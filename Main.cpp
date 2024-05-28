@@ -1,9 +1,20 @@
+#ifndef _DEFAULT_SOURCE
+#    define _DEFAULT_SOURCE
+#endif
+#ifndef _BSD_SOURCE
+#    define _BSD_SOURCE
+#endif
+#ifndef _GNU_SOURCE
+#    define _GNU_SOURCE
+#endif
+
 #include <cctype>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -11,6 +22,7 @@ int EditorReadKey();
 
 #define TEXT_EDITOR_VERSION "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1F)
+#define TAB_STOP 8
 
 enum EditorKey
 {
@@ -20,14 +32,29 @@ enum EditorKey
     ARROW_DOWN = 'j',
     PAGE_UP = 1000,
     PAGE_DOWN,
+    DEL_KEY,
+    HOME_KEY,
+    END_KEY,
 };
+
+typedef struct EditorRow
+{
+    int size;
+    int rsize;
+    char* chars;
+    char* render;
+} EditorRow;
 
 struct EditorConfig
 {
     int cursorX;
     int cursorY;
+    int rowOff;
+    int colOff;
     int screenRow;
     int screenCol;
+    int rowNum;
+    EditorRow* row;
     struct termios origTermios;
 };
 
@@ -135,55 +162,173 @@ void abFree(struct abuf* ab)
     ::free(ab->buf);
 }
 
+void EditorUpdateRow(EditorRow* row)
+{
+    int tabs = 0;
+    for (int j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
+            tabs++;
+        }
+    }
+    ::free(row->render);
+    row->render = reinterpret_cast<char*>(
+        ::malloc(row->size + tabs * (TAB_STOP - 1) + 1));
+
+    int idx = 0;
+    for (int j = 0; j < row->size; j++) {
+        if (row->chars[j] == '\t') {
+            row->render[idx++] = ' ';
+            while ((idx % TAB_STOP) != 0) {
+                row->render[idx++] = ' ';
+            }
+        } else {
+            row->render[idx++] = row->chars[j];
+        }
+    }
+    row->render[idx] = '\0';
+    row->rsize = idx;
+}
+
+void EditorAppendRow(char* s, size_t len)
+{
+    config.row = reinterpret_cast<EditorRow*>(
+        ::realloc(config.row, sizeof(EditorRow) * (config.rowNum + 1)));
+
+    int at = config.rowNum;
+    config.row[at].size = len;
+    config.row[at].chars = reinterpret_cast<char*>(::malloc(len + 1));
+    ::memcpy(config.row[at].chars, s, len);
+    config.row[at].chars[len] = '\0';
+
+    config.row[at].rsize = 0;
+    config.row[at].render = nullptr;
+    EditorUpdateRow(&config.row[at]);
+
+    config.rowNum++;
+}
+
+void EditorOpen(char* filename)
+{
+    FILE* fp = fopen(filename, "r");
+    if (!fp) {
+        die("fopen");
+    }
+
+    char* line = nullptr;
+    size_t lineCap = 0;
+    ssize_t lineLen;
+    while ((lineLen = ::getline(&line, &lineCap, fp)) != -1) {
+        while (lineLen > 0 &&
+               (line[lineLen - 1] == '\n' || line[lineLen - 1] == '\r')) {
+            lineLen--;
+        }
+        EditorAppendRow(line, lineLen);
+    }
+    free(line);
+    fclose(fp);
+}
+
 void EditorMoveCursor(int key)
 {
+    EditorRow* row = (config.cursorY >= config.rowNum)
+                         ? nullptr
+                         : &config.row[config.cursorY];
     switch (key) {
     case ARROW_LEFT:
+    {
         if (config.cursorX != 0) {
             config.cursorX--;
+        } else if (config.cursorY > 0) {
+            config.cursorY--;
+            config.cursorX = config.row[config.cursorY].size;
         }
         break;
+    }
     case ARROW_RIGHT:
-        if (config.cursorX != config.screenCol - 1) {
+    {
+        if (row && config.cursorX < row->size) {
             config.cursorX++;
+        } else if (row && config.cursorX == row->size) {
+            config.cursorY++;
+            config.cursorX = 0;
         }
         break;
+    }
     case ARROW_UP:
+    {
         if (config.cursorY != 0) {
             config.cursorY--;
         }
         break;
+    }
     case ARROW_DOWN:
-        if (config.cursorY != config.screenRow - 1) {
+    {
+        if (config.cursorY < config.rowNum) {
             config.cursorY++;
         }
         break;
+    }
+    }
+
+    row = (config.cursorY >= config.rowNum) ? nullptr
+                                            : &config.row[config.cursorY];
+    int rowLen = row ? row->size : 0;
+    if (config.cursorX > rowLen) {
+        config.cursorX = rowLen;
+    }
+}
+
+void EditorScroll()
+{
+    if (config.cursorY < config.rowOff) {
+        config.rowOff = config.cursorY;
+    }
+    if (config.cursorY >= config.rowOff + config.screenRow) {
+        config.rowOff = config.cursorY - config.screenRow + 1;
+    }
+    if (config.cursorX < config.colOff) {
+        config.colOff = config.cursorX;
+    }
+    if (config.cursorX >= config.colOff + config.screenCol) {
+        config.colOff = config.cursorX - config.screenCol + 1;
     }
 }
 
 void EditorDrawRows(struct abuf* ab)
 {
     for (int y = 0; y < config.screenRow; y++) {
-        if (y == config.screenRow / 3) {
-            char welcome[80];
-            int welcomeLen = snprintf(welcome,
-                                      sizeof(welcome),
-                                      "TextEditor -- version %s",
-                                      TEXT_EDITOR_VERSION);
-            if (welcomeLen > config.screenCol) {
-                welcomeLen = config.screenCol;
-            }
-            int padding = (config.screenCol - welcomeLen) / 2;
-            if (padding) {
+        int fileRow = y + config.rowOff;
+        if (fileRow >= config.rowNum) {
+            if (config.rowNum == 0 && y == config.screenRow / 3) {
+                char welcome[80];
+                int welcomeLen = snprintf(welcome,
+                                          sizeof(welcome),
+                                          "TextEditor -- version %s",
+                                          TEXT_EDITOR_VERSION);
+                if (welcomeLen > config.screenCol) {
+                    welcomeLen = config.screenCol;
+                }
+                int padding = (config.screenCol - welcomeLen) / 2;
+                if (padding) {
+                    abAppend(ab, "~", 1);
+                    padding--;
+                }
+                while (padding--) {
+                    abAppend(ab, " ", 1);
+                }
+                abAppend(ab, welcome, welcomeLen);
+            } else {
                 abAppend(ab, "~", 1);
-                padding--;
             }
-            while (padding--) {
-                abAppend(ab, " ", 1);
-            }
-            abAppend(ab, welcome, welcomeLen);
         } else {
-            abAppend(ab, "~", 1);
+            int len = config.row[fileRow].rsize - config.colOff;
+            if (len < 0) {
+                len = 0;
+            }
+            if (len > config.screenCol) {
+                len = config.screenCol;
+            }
+            abAppend(ab, &config.row[fileRow].render[config.colOff], len);
         }
 
         abAppend(ab, "\x1b[K", 3);
@@ -195,6 +340,8 @@ void EditorDrawRows(struct abuf* ab)
 
 void EditorRefreshScreen()
 {
+    EditorScroll();
+
     struct abuf ab = ABUF_INIT;
 
     abAppend(&ab, "\x1b[?25l", 6);
@@ -206,8 +353,8 @@ void EditorRefreshScreen()
     snprintf(buf,
              sizeof(buf),
              "\x1b[%d;%dH",
-             config.cursorY + 1,
-             config.cursorX + 1);
+             (config.cursorY - config.rowOff) + 1,
+             (config.cursorX - config.colOff) + 1);
     abAppend(&ab, buf, strlen(buf));
 
     abAppend(&ab, "\x1b[?25h", 6);
@@ -240,8 +387,13 @@ int EditorReadKey()
                 }
                 if (seq[2] == '~') {
                     switch (seq[1]) {
+                    case '1': return HOME_KEY;
+                    case '3': return DEL_KEY;
+                    case '4': return END_KEY;
                     case '5': return PAGE_UP;
                     case '6': return PAGE_DOWN;
+                    case '7': return HOME_KEY;
+                    case '8': return END_KEY;
                     }
                 }
             } else {
@@ -250,9 +402,17 @@ int EditorReadKey()
                 case 'B': return ARROW_DOWN;
                 case 'C': return ARROW_RIGHT;
                 case 'D': return ARROW_LEFT;
+                case 'H': return HOME_KEY;
+                case 'F': return END_KEY;
                 }
             }
+        } else if (seq[0] == 'O') {
+            switch (seq[1]) {
+            case 'H': return HOME_KEY;
+            case 'F': return END_KEY;
+            }
         }
+
         return '\x1b';
     } else {
         return c;
@@ -271,6 +431,16 @@ void EditorProcessKeyProcess()
         exit(0);
         break;
     }
+    case HOME_KEY:
+    {
+        config.cursorX = 0;
+        break;
+    }
+    case END_KEY:
+    {
+        config.cursorX = config.screenCol - 1;
+        break;
+    }
     case PAGE_UP:
     case PAGE_DOWN:
     {
@@ -278,11 +448,16 @@ void EditorProcessKeyProcess()
         while (times--) {
             EditorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
         }
+        break;
     }
     case ARROW_UP:
     case ARROW_DOWN:
     case ARROW_LEFT:
-    case ARROW_RIGHT: EditorMoveCursor(c); break;
+    case ARROW_RIGHT:
+    {
+        EditorMoveCursor(c);
+        break;
+    }
     }
 }
 
@@ -290,6 +465,10 @@ void InitEditor()
 {
     config.cursorX = 0;
     config.cursorY = 0;
+    config.rowOff = 0;
+    config.colOff = 0;
+    config.rowNum = 0;
+    config.row = nullptr;
     if (GetWindowSize(config.screenRow, config.screenCol) == -1) {
         die("GetWindowSize");
     }
@@ -299,6 +478,9 @@ int main(int argc, char* argv[])
 {
     EnableRawMode();
     InitEditor();
+    if (argc >= 2) {
+        EditorOpen(argv[1]);
+    }
 
     while (true) {
         EditorRefreshScreen();
