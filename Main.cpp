@@ -12,7 +12,8 @@ int EditorReadKey();
 #define TEXT_EDITOR_VERSION "0.0.1"
 #define CTRL_KEY(k) ((k) & 0x1F)
 
-enum EditorKey {
+enum EditorKey
+{
     ARROW_LEFT = 'h',
     ARROW_RIGHT = 'l',
     ARROW_UP = 'k',
@@ -21,7 +22,8 @@ enum EditorKey {
     PAGE_DOWN,
 };
 
-struct EditorConfig {
+struct EditorConfig
+{
     int cursorX;
     int cursorY;
     int screenRow;
@@ -109,7 +111,8 @@ int GetWindowSize(int& row, int& col)
     }
 }
 
-struct abuf {
+struct abuf
+{
     char* buf;
     int len;
 };
@@ -163,7 +166,10 @@ void EditorDrawRows(struct abuf* ab)
     for (int y = 0; y < config.screenRow; y++) {
         if (y == config.screenRow / 3) {
             char welcome[80];
-            int welcomeLen = snprintf(welcome, sizeof(welcome), "TextEditor -- version %s", TEXT_EDITOR_VERSION);
+            int welcomeLen = snprintf(welcome,
+                                      sizeof(welcome),
+                                      "TextEditor -- version %s",
+                                      TEXT_EDITOR_VERSION);
             if (welcomeLen > config.screenCol) {
                 welcomeLen = config.screenCol;
             }
@@ -197,7 +203,11 @@ void EditorRefreshScreen()
     EditorDrawRows(&ab);
 
     char buf[32];
-    snprintf(buf, sizeof(buf), "\x1b[%d;%dH", config.cursorY + 1, config.cursorX + 1);
+    snprintf(buf,
+             sizeof(buf),
+             "\x1b[%d;%dH",
+             config.cursorY + 1,
+             config.cursorX + 1);
     abAppend(&ab, buf, strlen(buf));
 
     abAppend(&ab, "\x1b[?25h", 6);
@@ -230,22 +240,16 @@ int EditorReadKey()
                 }
                 if (seq[2] == '~') {
                     switch (seq[1]) {
-                    case '5':
-                        return PAGE_UP;
-                    case '6':
-                        return PAGE_DOWN;
+                    case '5': return PAGE_UP;
+                    case '6': return PAGE_DOWN;
                     }
                 }
             } else {
                 switch (seq[1]) {
-                case 'A':
-                    return ARROW_UP;
-                case 'B':
-                    return ARROW_DOWN;
-                case 'C':
-                    return ARROW_RIGHT;
-                case 'D':
-                    return ARROW_LEFT;
+                case 'A': return ARROW_UP;
+                case 'B': return ARROW_DOWN;
+                case 'C': return ARROW_RIGHT;
+                case 'D': return ARROW_LEFT;
                 }
             }
         }
@@ -260,14 +264,16 @@ void EditorProcessKeyProcess()
     int c = EditorReadKey();
 
     switch (c) {
-    case CTRL_KEY('q'): {
+    case CTRL_KEY('q'):
+    {
         ::write(STDOUT_FILENO, "\x1b[2J", 4);
         ::write(STDOUT_FILENO, "\x1b[H", 3);
         exit(0);
         break;
     }
     case PAGE_UP:
-    case PAGE_DOWN: {
+    case PAGE_DOWN:
+    {
         int times = config.screenRow;
         while (times--) {
             EditorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
@@ -276,9 +282,7 @@ void EditorProcessKeyProcess()
     case ARROW_UP:
     case ARROW_DOWN:
     case ARROW_LEFT:
-    case ARROW_RIGHT:
-        EditorMoveCursor(c);
-        break;
+    case ARROW_RIGHT: EditorMoveCursor(c); break;
     }
 }
 
