@@ -71,6 +71,8 @@ struct EditorConfig config;
 int EditorReadKey();
 void EditorSetStatusMessage(const char* fmt, ...);
 void EditorRowAppendString(EditorRow* row, char* s, size_t len);
+void EditorInsertRow(int at, char* s, size_t len);
+char* EditorPrompt(char* prompt, void (*callback)(char*, int));
 
 void die(const char* s)
 {
@@ -186,6 +188,23 @@ int EditorRowCxToRx(EditorRow* row, int cursorX)
     return renderX;
 }
 
+int EditorRowRxToCx(EditorRow* row, int rx)
+{
+    int curCursorX = 0;
+    int cursorX = 0;
+    for (; cursorX < row->size; cursorX++) {
+        if (row->chars[cursorX] == '\t') {
+            curCursorX += (TAB_STOP - 1) - (curCursorX % TAB_STOP);
+        }
+        curCursorX++;
+
+        if (curCursorX > cursorX) {
+            return cursorX;
+        }
+    }
+    return cursorX;
+}
+
 void EditorUpdateRow(EditorRow* row)
 {
     int tabs = 0;
@@ -213,7 +232,7 @@ void EditorUpdateRow(EditorRow* row)
     row->rsize = idx;
 }
 
-void editorInsertRow(int at, char* s, size_t len)
+void EditorInsertRow(int at, char* s, size_t len)
 {
     if (at < 0 || at > config.rowNum)
         return;
@@ -256,6 +275,24 @@ void EditorDelRow(int at)
             sizeof(EditorRow) * (config.rowNum - at - 1));
     config.rowNum--;
     config.dirty++;
+}
+
+void EditorInsertNewLine()
+{
+    if (config.cursorX == 0) {
+        EditorInsertRow(config.cursorY, "", 0);
+    } else {
+        EditorRow* row = &config.row[config.cursorY];
+        EditorInsertRow(config.cursorY + 1,
+                        &row->chars[config.cursorX],
+                        row->size - config.cursorX);
+        row = &config.row[config.cursorY];
+        row->size = config.cursorX;
+        row->chars[row->size] = '\0';
+        EditorUpdateRow(row);
+    }
+    config.cursorY++;
+    config.cursorX = 0;
 }
 
 void EditorRowDelChar(EditorRow* row, int at)
@@ -317,7 +354,7 @@ void EditorRowAppendString(EditorRow* row, char* s, size_t len)
 void EditorInsertChar(int c)
 {
     if (config.cursorY == config.rowNum) {
-        editorInsertRow(config.rowNum, "", 0);
+        EditorInsertRow(config.rowNum, "", 0);
     }
     EditorRowInsertChar(&config.row[config.cursorY], config.cursorX, c);
     config.cursorX++;
@@ -359,7 +396,7 @@ void EditorOpen(char* filename)
                (line[lineLen - 1] == '\n' || line[lineLen - 1] == '\r')) {
             lineLen--;
         }
-        editorInsertRow(config.rowNum, line, lineLen);
+        EditorInsertRow(config.rowNum, line, lineLen);
     }
     free(line);
     fclose(fp);
@@ -369,7 +406,11 @@ void EditorOpen(char* filename)
 void EditorSave()
 {
     if (config.fileName == nullptr) {
-        return;
+        config.fileName = EditorPrompt("Save as: %s (ESC to cancel)", nullptr);
+        if (config.fileName == nullptr) {
+            EditorSetStatusMessage("Saved aborted");
+            return;
+        }
     }
 
     int len;
@@ -390,6 +431,68 @@ void EditorSave()
     }
     free(buf);
     EditorSetStatusMessage("Can't save! I/O error: %s", strerror(errno));
+}
+
+void EditorFindCallback(char* query, int key)
+{
+    static int lastMatch = -1;
+    static int direction = 1;
+
+    if (key == '\r' || key == '\x1b') {
+        lastMatch = -1;
+        direction = 1;
+        return;
+    } else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+        direction = 1;
+    } else if (key == ARROW_LEFT || key == ARROW_UP) {
+        direction = -1;
+    } else {
+        lastMatch = -1;
+        direction = 1;
+    }
+
+    if (lastMatch == -1) {
+        direction = 1;
+    }
+    int current = lastMatch;
+    int i;
+    for (i = 0; i < config.rowNum; i++) {
+        current += direction;
+        if (current == -1) {
+            current = config.rowNum - 1;
+        } else if (current == config.rowNum) {
+            current = 0;
+        }
+        EditorRow* row = &config.row[i];
+        char* match = strstr(row->render, query);
+        if (match) {
+            lastMatch = current;
+            config.cursorY = current;
+            config.cursorY = i;
+            config.cursorX = EditorRowRxToCx(row, match - row->render);
+            config.rowOff = config.rowNum;
+            break;
+        }
+    }
+}
+
+void EditorFind()
+{
+    int savedCx = config.cursorX;
+    int savedCy = config.cursorY;
+    int savedColoff = config.colOff;
+    int savedRowoff = config.rowOff;
+
+    char* query =
+        EditorPrompt("Search: %s (Use ESC/Arrows/Enter)", EditorFindCallback);
+    if (query) {
+        free(query);
+    } else {
+        config.cursorX = savedCx;
+        config.cursorY = savedCy;
+        config.colOff = savedColoff;
+        config.rowOff = savedRowoff;
+    }
 }
 
 void EditorMoveCursor(int key)
@@ -577,6 +680,52 @@ void EditorRefreshScreen()
     abFree(&ab);
 }
 
+char* EditorPrompt(char* prompt, void (*callback)(char*, int))
+{
+    size_t bufSize = 128;
+    char* buf = reinterpret_cast<char*>(::malloc(bufSize));
+
+    size_t bufLen = 0;
+    buf[0] = '\0';
+
+    while (true) {
+        EditorSetStatusMessage(prompt, buf);
+        EditorRefreshScreen();
+
+        int c = EditorReadKey();
+        if (c == DEL_KEY || c == CTRL_KEY('h') || c == BACKSPACE) {
+            if (bufLen != 0) {
+                buf[--bufLen] = '\0';
+            }
+        } else if (c == '\x1b') {
+            EditorSetStatusMessage("");
+            if (callback) {
+                callback(buf, c);
+            }
+            free(buf);
+            return nullptr;
+        } else if (c == '\r') {
+            if (bufLen != 0) {
+                EditorSetStatusMessage("");
+                if (callback) {
+                    callback(buf, c);
+                }
+                return buf;
+            }
+        } else if (!::iscntrl(c) && c < 128) {
+            if (bufLen == bufSize - 1) {
+                bufSize *= 2;
+                buf = reinterpret_cast<char*>(::realloc(buf, bufSize));
+            }
+            buf[bufLen++] = c;
+            buf[bufLen++] = '\0';
+        }
+        if (callback) {
+            callback(buf, c);
+        }
+    }
+}
+
 void EditorSetStatusMessage(const char* fmt, ...)
 {
     va_list ap;
@@ -651,7 +800,7 @@ void EditorProcessKeyProcess()
     switch (c) {
     case '\r':
     {
-        // TODO
+        EditorInsertNewLine();
         break;
     }
     case CTRL_KEY('q'):
@@ -684,6 +833,10 @@ void EditorProcessKeyProcess()
             config.cursorX = config.row[config.cursorY].size;
         }
         break;
+    }
+    case CTRL_KEY('f'):
+    {
+        EditorFind();
     }
     case BACKSPACE:
     case CTRL_KEY('h'):
@@ -761,7 +914,7 @@ int main(int argc, char* argv[])
         EditorOpen(argv[1]);
     }
 
-    EditorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit");
+    EditorSetStatusMessage("HELP: Ctrl-S = save | Ctrl-Q = quit Ctrl-F = find");
     while (true) {
         EditorRefreshScreen();
         EditorProcessKeyProcess();
